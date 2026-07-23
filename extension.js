@@ -109,9 +109,12 @@ function activate(context) {
         const proc = spawn(scriptPath, args, { stdio: 'ignore', detached: true });
         proc.unref();
 
-        vscode.window.setStatusBarMessage(`Piper: saving ${path.basename(saveUri.fsPath)}...`, 8000);
+        const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+        statusBar.text = `$(sync~spin) Piper: saving ${path.basename(saveUri.fsPath)}...`;
+        statusBar.show();
 
         proc.on('exit', (code) => {
+            statusBar.dispose();
             if (code === 0) {
                 vscode.window.showInformationMessage(`Piper: saved to ${saveUri.fsPath}`);
             } else {
