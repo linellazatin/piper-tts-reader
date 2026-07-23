@@ -6,15 +6,12 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-# Config lives in ~/.config/piper-reader/ by default (XDG-compliant, writable when bundled in vsix).
-# Override by setting PIPER_READER_CONFIG env var, or place piper-reader.conf beside the script.
-XDG_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/piper-reader"
 if [[ -n "${PIPER_READER_CONFIG:-}" ]]; then
     CONFIG_FILE="$PIPER_READER_CONFIG"
 elif [[ -f "$SCRIPT_DIR/piper-reader.conf" ]]; then
     CONFIG_FILE="$SCRIPT_DIR/piper-reader.conf"
 else
-    CONFIG_FILE="$XDG_CONFIG_DIR/config"
+    CONFIG_FILE=""
 fi
 
 # -- Baked-in defaults (overridden by config file, then by CLI flags) --------

@@ -2,7 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.1] - 2026-07-23 - Initial release
+## [0.0.2] - 2026-07-23
+
+### Changed
+- Removed `~/.config/piper-reader/` (XDG-compliant removal for compatibility) config fallback -- config resolution is now: `PIPER_READER_CONFIG` env var > `piper-reader.conf` beside script > baked-in defaults
+- Fixed variables clean-up
+
+### Added
+- `CHANGELOG.md`
+
+## [0.0.1] - 2026-07-23
+
+ - Initial release
 
 ### Added
 - `piper-reader` bash script for reading text and markdown files aloud via piper-tts

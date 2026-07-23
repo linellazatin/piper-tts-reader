@@ -106,14 +106,10 @@ MODEL=en_US-amy-medium
 VOICES_DIR=/path/to/your/voices
 ```
 
-**Option B -- user config file:**
+**Option B -- env var pointing to any config file:**
 
 ```bash
-mkdir -p ~/.config/piper-reader
-cat > ~/.config/piper-reader/config <<'EOF'
-MODEL=en_US-amy-medium
-VOICES_DIR=/path/to/your/voices
-EOF
+export PIPER_READER_CONFIG=/path/to/my-piper.conf
 ```
 
 **Option C -- CLI flag per invocation:**
@@ -140,8 +136,7 @@ SAMPLE_RATE=22050
 Config resolution order:
 1. `PIPER_READER_CONFIG` env var (if set, path to a config file)
 2. `piper-reader.conf` beside the script (if present)
-3. `~/.config/piper-reader/config` (if present)
-4. Baked-in defaults (no `VOICES_DIR` -- must be set explicitly)
+3. Baked-in defaults (no `VOICES_DIR` -- must be set explicitly)
 
 All values can be overridden per-invocation via CLI flags.
 
