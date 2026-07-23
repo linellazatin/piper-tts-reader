@@ -2,7 +2,7 @@
   "name": "piper-reader",
   "displayName": "Piper Reader",
   "description": "Read files aloud using piper-tts via piper-reader (Linux, macOS, Windows)",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "Lines",
   "repository": { "type": "git", "url": "https://github.com/linellazatin/piper-tts-reader" },
   "engines": { "vscode": "^1.75.0" },
