@@ -1,0 +1,13 @@
+# piper-reader configuration (local dev overrides)
+# MODEL - can be full path, or just the onnx model name/filename
+MODEL=/where/your/voices/en_US-amy-medium.onnx
+VOICES_DIR=/where/your/voices
+LENGTH_SCALE=1.0
+NOISE_SCALE=0.9
+NOISE_W_SCALE=0.85
+SENTENCE_SILENCE=0.4
+VOLUME=0.75
+SOX_GAIN=-1
+TEMPO=1.1
+SAMPLE_RATE=22050
+SPEAKER=

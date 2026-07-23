@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# piper-reader -- wrapper around piper-tts for reading text/markdown aloud
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+# Config lives in ~/.config/piper-reader/ by default (XDG-compliant, writable when bundled in vsix).
+# Override by setting PIPER_READER_CONFIG env var, or place piper-reader.conf beside the script.
+XDG_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/piper-reader"
+if [[ -n "${PIPER_READER_CONFIG:-}" ]]; then
+    CONFIG_FILE="$PIPER_READER_CONFIG"
+elif [[ -f "$SCRIPT_DIR/piper-reader.conf" ]]; then
+    CONFIG_FILE="$SCRIPT_DIR/piper-reader.conf"
+else
+    CONFIG_FILE="$XDG_CONFIG_DIR/config"
+fi
+
+# -- Baked-in defaults (overridden by config file, then by CLI flags) --------
+MODEL=""
+VOICES_DIR=""
+LENGTH_SCALE=1.05
+NOISE_SCALE=0.6
+NOISE_W_SCALE=0.8
+SENTENCE_SILENCE=0.2
+VOLUME=1.0
+SAMPLE_RATE=22050
+SOX_GAIN=-3
+TEMPO=1.0
+SPEAKER=""
+NO_NORMALIZE=0
+DEBUG=0
+OUTPUT_FILE=""
+PIPER_ARGS=()
+TMP_RAW=""
+
+cleanup() { [[ -n "$TMP_RAW" ]] && rm -f "$TMP_RAW"; }
+trap cleanup EXIT
+
+# -- Source config if present -----------------------------------------------
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+Usage: piper-reader [OPTIONS] [FILE]
+
+  FILE                       Input file to read aloud (reads stdin if omitted)
+
+Voice model:
+  -m, --model MODEL          Path to .onnx model file, or bare name
+                             (e.g. en_US-lessac-high -> VOICES_DIR/en_US-lessac-high.onnx)
+      --voices-dir DIR       Directory containing voice models (default: $VOICES_DIR)
+
+Voice tuning:
+  -l, --length-scale N       Phoneme length / speed  (default: $LENGTH_SCALE)
+  -n, --noise-scale N        Generator noise         (default: $NOISE_SCALE)
+  -w, --noise-w N            Phoneme width noise     (default: $NOISE_W_SCALE)
+  -s, --speaker ID           Speaker ID for multi-speaker models (default: 0)
+      --sentence-silence N   Seconds of silence after each sentence (default: $SENTENCE_SILENCE)
+      --volume N             Volume multiplier       (default: $VOLUME)
+      --sox-gain N           Sox gain in dB to prevent clipping (default: $SOX_GAIN)
+      --tempo N              Post-process speed (pitch-preserving, 1.0=normal, 0.9=10% slower) (default: $TEMPO)
+      --no-normalize         Disable audio normalization
+
+Output:
+  -o, --output FILE.wav      Save to WAV file instead of playing via aplay
+
+Model management:
+      --download NAME        Download model + config from HF rhasspy/piper-voices
+                             e.g. --download en_US-lessac-high
+      --list                 List available .onnx models in VOICES_DIR
+
+Misc:
+      --debug                Enable piper debug output
+  -h, --help                 Show this help
+
+Config file: $CONFIG_FILE
+Voices dir:  $VOICES_DIR
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# strip_markdown: read stdin, emit plain text suitable for TTS
+strip_markdown() {
+    sed \
+        -e '/^```/,/^```/d' \
+        -e 's/`\([^`]*\)`/\1/g' \
+        -e 's/^[[:space:]]*#\+[[:space:]]*//' \
+        -e 's/!\[[^]]*\]([^)]*)//g' \
+        -e 's/\[\([^]]*\)\]([^)]*)/\1/g' \
+        -e 's/<[^>]*>//g' \
+        -e 's/\*\*\([^*]*\)\*\*/\1/g' \
+        -e 's/__\([^_]*\)__/\1/g' \
+        -e 's/\*\([^*]*\)\*/\1/g' \
+        -e '/^[[:space:]]*[-*=]\{3,\}[[:space:]]*$/d' \
+    | cat -s
+    # ponytail: cat -s collapses multiple blank lines to one -- no awk needed
+}
+
+# ---------------------------------------------------------------------------
+# resolve_model: bare name -> full path
+resolve_model() {
+    local m="$1"
+    if [[ "$m" == */* ]]; then
+        echo "$m"
+        return
+    fi
+    # try with .onnx appended
+    if [[ -f "$VOICES_DIR/${m}.onnx" ]]; then
+        echo "$VOICES_DIR/${m}.onnx"
+        return
+    fi
+    # try as-is (user included .onnx)
+    if [[ -f "$VOICES_DIR/$m" ]]; then
+        echo "$VOICES_DIR/$m"
+        return
+    fi
+    echo "$m"  # fall through -- piper will error if not found
+}
+
+# ---------------------------------------------------------------------------
+# cmd_list: show available models
+cmd_list() {
+    if [[ -z "$VOICES_DIR" ]]; then
+        echo "Error: VOICES_DIR is not set. Use --voices-dir or set it in piper-reader.conf." >&2
+        exit 1
+    fi
+    echo "Models in $VOICES_DIR:"
+    local found=0
+    for f in "$VOICES_DIR"/*.onnx; do
+        [[ -f "$f" ]] || continue
+        echo "  $(basename "$f" .onnx)"
+        found=1
+    done
+    if [[ $found -eq 0 ]]; then
+        echo "  (none found -- use --download to fetch a model)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_download: fetch model + config from HF
+# NAME format: en_US-lessac-high  (locale-name-quality)
+cmd_download() {
+    local name="$1"
+    if [[ -z "$VOICES_DIR" ]]; then
+        echo "Error: VOICES_DIR is not set. Use --voices-dir or set it in piper-reader.conf." >&2
+        exit 1
+    fi
+    # parse: en_US-lessac-high -> locale=en_US, rest splits on last '-'
+    # quality is the last segment, name is middle, lang is prefix of locale
+    local locale name_part quality lang
+    # split on '-': first field is locale, last is quality, middle is name
+    IFS='-' read -r locale name_part quality <<< "$name"
+    lang="${locale%%_*}"   # en_US -> en
+
+    local base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main"
+    local url_prefix="$base_url/$lang/$locale/$name_part/$quality/$name"
+
+    mkdir -p "$VOICES_DIR"
+    echo "Downloading $name to $VOICES_DIR ..." >&2
+    curl -L --progress-bar -o "$VOICES_DIR/${name}.onnx"      "${url_prefix}.onnx"
+    curl -L --progress-bar -o "$VOICES_DIR/${name}.onnx.json" "${url_prefix}.onnx.json"
+    echo "Done. Model saved to $VOICES_DIR/${name}.onnx" >&2
+}
+
+# ---------------------------------------------------------------------------
+# build_piper_args: assemble piper flags into array
+build_piper_args() {
+    local model="$1"
+    PIPER_ARGS=(
+        -m "$model"
+        --length-scale "$LENGTH_SCALE"
+        --noise-scale "$NOISE_SCALE"
+        --noise-w-scale "$NOISE_W_SCALE"
+        --sentence-silence "$SENTENCE_SILENCE"
+        --volume "$VOLUME"
+    )
+    if [[ -n "$SPEAKER" ]];       then PIPER_ARGS+=(--speaker "$SPEAKER"); fi
+    if [[ $NO_NORMALIZE -eq 1 ]]; then PIPER_ARGS+=(--no-normalize); fi
+    if [[ $DEBUG -eq 1 ]];        then PIPER_ARGS+=(--debug); fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_read: preprocess text and run piper
+cmd_read() {
+    local input_file="$1"
+    local model
+
+    # auto-pick first available model if MODEL is unset
+    if [[ -z "$MODEL" ]]; then
+        if [[ -z "$VOICES_DIR" ]]; then
+            echo "Error: no model specified and VOICES_DIR is not set. Use -m, --voices-dir, or set them in piper-reader.conf." >&2
+            exit 1
+        fi
+        for f in "$VOICES_DIR"/*.onnx; do
+            [[ -f "$f" ]] && MODEL="$f" && break
+        done
+    fi
+
+    model="$(resolve_model "$MODEL")"
+
+    if [[ ! -f "$model" ]]; then
+        echo "Error: model not found: $model" >&2
+        echo "Use --list to see available models, or --download to fetch one." >&2
+        exit 1
+    fi
+
+    build_piper_args "$model"
+
+    # get preprocessed text
+    local text
+    if [[ -n "$input_file" ]]; then
+        text="$(strip_markdown < "$input_file")"
+    else
+        text="$(strip_markdown)"
+    fi
+
+    # count paragraphs upfront for progress display
+    local total
+    total="$(printf '%s\n' "$text" | awk 'BEGIN{RS=""; n=0} NF{n++} END{print n}')"
+
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        # WAV output: paragraph-split raw PCM -> prepend WAV header via sox or aplay trick.
+        # piper -f writes a complete WAV per call; we need one WAV from many paragraphs.
+        # Use sox if available, otherwise raw PCM + manual WAV header via aplay to file.
+        TMP_RAW="$(mktemp /tmp/piper-reader-XXXXXX.raw)"
+
+        local n=0
+        printf '%s\n' "$text" \
+          | awk 'BEGIN{RS=""; ORS="\0"} NF{print}' \
+          | while IFS= read -r -d '' para; do
+                n=$((n + 1))
+                printf '\r[%d/%d] generating...' "$n" "$total" >&2
+                # fade in each paragraph (10ms) to eliminate PCM discontinuity clicks.
+                # fade-out omitted: sox needs known length for fade-out on streams.
+                printf '%s\n' "$para" | piper "${PIPER_ARGS[@]}" --output-raw 2>/dev/null \
+                  | sox -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 - \
+                        -t raw - gain "$SOX_GAIN" fade t 0.01 tempo "$TEMPO"
+            done >> "$TMP_RAW"
+        printf '\n' >&2
+
+        if command -v sox &>/dev/null; then
+            sox -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 "$TMP_RAW" \
+                "$OUTPUT_FILE" gain "$SOX_GAIN"
+        else
+            python3 -c "
+import struct
+raw = open('$TMP_RAW','rb').read()
+n = len(raw)
+with open('$OUTPUT_FILE','wb') as f:
+    f.write(b'RIFF')
+    f.write(struct.pack('<I', 36 + n))
+    f.write(b'WAVEfmt ')
+    f.write(struct.pack('<IHHIIHH', 16, 1, 1, $SAMPLE_RATE, $SAMPLE_RATE*2, 2, 16))
+    f.write(b'data')
+    f.write(struct.pack('<I', n))
+    f.write(raw)
+"
+        fi
+        echo "Saved to $OUTPUT_FILE" >&2
+    else
+        # Live playback: split into paragraphs, one piper call each.
+        # ponytail: awk NUL-separates paragraphs; read -d '' consumes them cleanly
+        local n=0
+        printf '%s\n' "$text" \
+          | awk 'BEGIN{RS=""; ORS="\0"} NF{print}' \
+          | while IFS= read -r -d '' para; do
+                n=$((n + 1))
+                printf '\r[%d/%d] generating...' "$n" "$total" >&2
+                printf '%s\n' "$para" | piper "${PIPER_ARGS[@]}" --output-raw 2>/dev/null \
+                  | sox -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 - \
+                        -t raw - gain "$SOX_GAIN" fade t 0.01 tempo "$TEMPO"
+            done \
+          | { printf '\rPlaying...          \n' >&2
+              play -q -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 -; }
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# parse_args
+parse_args() {
+    local do_list=0
+    local do_download=""
+    local input_file=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage; exit 0 ;;
+            -m|--model)
+                MODEL="$2"; shift 2 ;;
+            --voices-dir)
+                VOICES_DIR="$2"; shift 2 ;;
+            -l|--length-scale)
+                LENGTH_SCALE="$2"; shift 2 ;;
+            -n|--noise-scale)
+                NOISE_SCALE="$2"; shift 2 ;;
+            -w|--noise-w)
+                NOISE_W_SCALE="$2"; shift 2 ;;
+            -s|--speaker)
+                SPEAKER="$2"; shift 2 ;;
+            --sentence-silence)
+                SENTENCE_SILENCE="$2"; shift 2 ;;
+            --volume)
+                VOLUME="$2"; shift 2 ;;
+            --sox-gain)
+                SOX_GAIN="$2"; shift 2 ;;
+            --tempo)
+                TEMPO="$2"; shift 2 ;;
+            --no-normalize)
+                NO_NORMALIZE=1; shift ;;
+            -o|--output)
+                OUTPUT_FILE="$2"; shift 2 ;;
+            --list)
+                do_list=1; shift ;;
+            --download)
+                do_download="$2"; shift 2 ;;
+            --debug)
+                DEBUG=1; shift ;;
+            --)
+                shift; input_file="${1:-}"; break ;;
+            -*)
+                echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+            *)
+                input_file="$1"; shift ;;
+        esac
+    done
+
+    # dispatch
+    if [[ $do_list -eq 1 ]]; then
+        cmd_list
+        exit 0
+    fi
+    if [[ -n "$do_download" ]]; then
+        cmd_download "$do_download"
+        exit 0
+    fi
+
+    # validate input file if given
+    if [[ -n "$input_file" && ! -f "$input_file" ]]; then
+        echo "Error: file not found: $input_file" >&2
+        exit 1
+    fi
+
+    cmd_read "$input_file"
+}
+
+# ---------------------------------------------------------------------------
+main() {
+    load_config
+    parse_args "$@"
+}
+
+main "$@"

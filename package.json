@@ -1,0 +1,99 @@
+{
+  "name": "piper-reader",
+  "displayName": "Piper Reader",
+  "description": "Read files aloud using piper-tts via piper-reader (Linux, macOS, Windows)",
+  "version": "0.0.1",
+  "publisher": "Lines",
+  "repository": { "type": "git", "url": "https://github.com/linellazatin/piper-tts-reader" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Machine Learning", "Other"],
+  "activationEvents": ["onCommand:piper-reader.readFile", "onCommand:piper-reader.saveFile"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "piper-reader.readFile",
+        "title": "Piper Read"
+      },
+      {
+        "command": "piper-reader.stop",
+        "title": "Piper Stop"
+      },
+      {
+        "command": "piper-reader.saveFile",
+        "title": "Piper Save"
+      }
+    ],
+    "menus": {
+      "editor/title/context": [
+        {
+          "command": "piper-reader.readFile",
+          "group": "navigation"
+        },
+        {
+          "command": "piper-reader.stop",
+          "group": "navigation"
+        },
+        {
+          "command": "piper-reader.saveFile",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Piper Reader",
+      "properties": {
+        "piperReader.voicesDir": {
+          "type": "string",
+          "default": "",
+          "description": "Directory where voice models (.onnx files) are stored."
+        },
+        "piperReader.model": {
+          "type": "string",
+          "default": "en_US-amy-medium",
+          "description": "Voice model name or path (e.g. en_US-amy-medium). Bare names are resolved against the voices directory."
+        },
+        "piperReader.lengthScale": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Phoneme length / speed (higher = slower). 1.0 = normal."
+        },
+        "piperReader.noiseScale": {
+          "type": "number",
+          "default": 0.9,
+          "description": "Generator noise / expressiveness."
+        },
+        "piperReader.noiseW": {
+          "type": "number",
+          "default": 0.85,
+          "description": "Phoneme width noise."
+        },
+        "piperReader.sentenceSilence": {
+          "type": "number",
+          "default": 0.4,
+          "description": "Seconds of silence after each sentence."
+        },
+        "piperReader.volume": {
+          "type": "number",
+          "default": 0.75,
+          "description": "Volume multiplier (1.0 = unchanged)."
+        },
+        "piperReader.tempo": {
+          "type": "number",
+          "default": 1.1,
+          "description": "Post-process speed, pitch-preserving (1.0=normal, 0.9=10% slower)."
+        },
+        "piperReader.soxGain": {
+          "type": "number",
+          "default": -1,
+          "description": "Sox gain in dB applied after piper output to prevent clipping. 0 to disable."
+        },
+        "piperReader.speaker": {
+          "type": "string",
+          "default": "",
+          "description": "Speaker ID for multi-speaker models. Leave empty for single-speaker models."
+        }
+      }
+    }
+  }
+}

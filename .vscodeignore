@@ -1,0 +1,5 @@
+*.conf
+*.sampleconf
+.gitignore
+.github
+*.vsix
